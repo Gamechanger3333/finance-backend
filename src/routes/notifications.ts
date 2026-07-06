@@ -1,6 +1,5 @@
 import { Router } from "express";
-import { db, notificationsTable } from "../db/index.js";
-import { eq, and, desc } from "drizzle-orm";
+import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
 
@@ -8,13 +7,12 @@ const router = Router();
 
 router.get("/", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const notifs = await db
-      .select()
-      .from(notificationsTable)
-      .where(eq(notificationsTable.userId, req.userId!))
-      .orderBy(desc(notificationsTable.createdAt))
-      .limit(20);
-    res.json(notifs.map((n) => ({ ...n, createdAt: n.createdAt.toISOString() })));
+    const notifs = await prisma.notification.findMany({
+      where: { userId: req.userId! },
+      orderBy: { createdAt: "desc" },
+      take: 20,
+    });
+    res.json(notifs.map((n: any) => ({ ...n, createdAt: n.createdAt.toISOString() })));
   } catch (err) {
     logger.error({ err }, "List notifications error");
     res.status(500).json({ error: "Failed to fetch notifications" });
@@ -24,15 +22,10 @@ router.get("/", requireAuth, async (req: AuthRequest, res) => {
 router.patch("/:id/read", requireAuth, async (req: AuthRequest, res) => {
   try {
     const id = parseInt(req.params.id);
-    const [notif] = await db
-      .update(notificationsTable)
-      .set({ isRead: true })
-      .where(and(eq(notificationsTable.id, id), eq(notificationsTable.userId, req.userId!)))
-      .returning();
-    if (!notif) {
-      res.status(404).json({ error: "Notification not found" });
-      return;
-    }
+    const existing = await prisma.notification.findFirst({ where: { id, userId: req.userId! }, select: { id: true } });
+    if (!existing) { res.status(404).json({ error: "Notification not found" }); return; }
+
+    const notif = await prisma.notification.update({ where: { id }, data: { isRead: true } });
     res.json({ ...notif, createdAt: notif.createdAt.toISOString() });
   } catch (err) {
     logger.error({ err }, "Mark notification read error");

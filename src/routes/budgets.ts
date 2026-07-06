@@ -1,71 +1,66 @@
-import { Router } from "express";
-import { db, budgetsTable, transactionsTable, categoriesTable } from "../db/index.js";
-import { eq, and, gte, lte } from "drizzle-orm";
+import { Router, Response } from "express";
+import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
+import { getPeriodRange, getExpenseSpendByCategory } from "../lib/finance.js";
 
 const router = Router();
 
-async function computeBudgetProgress(budget: typeof budgetsTable.$inferSelect, userId: number) {
-  const now = new Date();
-  let startDate: string, endDate: string;
+function isPositiveNumber(v: unknown): boolean {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0;
+}
 
-  if (budget.period === "monthly") {
-    startDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
-    const lastDay = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
-    endDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${lastDay}`;
-  } else if (budget.period === "weekly") {
-    const day = now.getDay();
-    const start = new Date(now);
-    start.setDate(now.getDate() - day);
-    const end = new Date(start);
-    end.setDate(start.getDate() + 6);
-    startDate = start.toISOString().split("T")[0];
-    endDate = end.toISOString().split("T")[0];
-  } else {
-    startDate = `${now.getFullYear()}-01-01`;
-    endDate = `${now.getFullYear()}-12-31`;
+async function isCategoryUsableByUser(categoryId: number, userId: number): Promise<boolean> {
+  const cat = await prisma.category.findFirst({
+    where: { id: categoryId, OR: [{ isDefault: true }, { userId }] },
+    select: { id: true },
+  });
+  return !!cat;
+}
+
+async function attachProgress(budgets: any[], userId: number) {
+  if (budgets.length === 0) return [];
+
+  // Group by period so each period window is computed once
+  const byPeriod = new Map<string, any[]>();
+  for (const b of budgets) {
+    const list = byPeriod.get(b.period) ?? [];
+    list.push(b);
+    byPeriod.set(b.period, list);
   }
 
-  const expenses = await db
-    .select()
-    .from(transactionsTable)
-    .where(
-      and(
-        eq(transactionsTable.userId, userId),
-        eq(transactionsTable.categoryId, budget.categoryId),
-        eq(transactionsTable.type, "expense"),
-        gte(transactionsTable.date, startDate),
-        lte(transactionsTable.date, endDate)
-      )
-    );
+  const spendMap = new Map<number, number>();
+  for (const [period, group] of byPeriod) {
+    const { startDate, endDate } = getPeriodRange(period);
+    const ids = group.map((b: any) => b.categoryId);
+    const spend = await getExpenseSpendByCategory(userId, ids, startDate, endDate);
+    for (const [catId, total] of spend) spendMap.set(catId, total);
+  }
 
-  const spent = expenses.reduce((sum, tx) => sum + tx.amount, 0);
-  const remaining = Math.max(0, budget.amount - spent);
-  const percentage = budget.amount > 0 ? Math.min(100, (spent / budget.amount) * 100) : 0;
-
-  const [cat] = await db
-    .select()
-    .from(categoriesTable)
-    .where(eq(categoriesTable.id, budget.categoryId))
-    .limit(1);
-
-  return {
-    ...budget,
-    categoryName: cat?.name ?? "Unknown",
-    spent,
-    remaining,
-    percentage,
-    isOverBudget: spent > budget.amount,
-    createdAt: budget.createdAt.toISOString(),
-  };
+  return budgets.map((budget) => {
+    const spent = spendMap.get(budget.categoryId) ?? 0;
+    const remaining = Math.max(0, budget.amount - spent);
+    const percentage = budget.amount > 0 ? Math.min(100, (spent / budget.amount) * 100) : 0;
+    return {
+      ...budget,
+      categoryName: budget.category?.name ?? "Unknown",
+      spent,
+      remaining,
+      percentage,
+      isOverBudget: spent > budget.amount,
+      createdAt: budget.createdAt instanceof Date ? budget.createdAt.toISOString() : budget.createdAt,
+    };
+  });
 }
 
 router.get("/", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const budgets = await db.select().from(budgetsTable).where(eq(budgetsTable.userId, req.userId!));
-    const withProgress = await Promise.all(budgets.map((b) => computeBudgetProgress(b, req.userId!)));
-    res.json(withProgress);
+    const budgets = await prisma.budget.findMany({
+      where: { userId: req.userId! },
+      include: { category: { select: { name: true, icon: true } } },
+    });
+    res.json(await attachProgress(budgets, req.userId!));
   } catch (err) {
     logger.error({ err }, "List budgets error");
     res.status(500).json({ error: "Failed to fetch budgets" });
@@ -75,53 +70,79 @@ router.get("/", requireAuth, async (req: AuthRequest, res) => {
 router.post("/", requireAuth, async (req: AuthRequest, res) => {
   try {
     const { name, amount, period, categoryId } = req.body;
-    if (!name || !amount || !period || !categoryId) {
-      res.status(400).json({ error: "name, amount, period, categoryId required" });
-      return;
-    }
-    const [budget] = await db
-      .insert(budgetsTable)
-      .values({ userId: req.userId!, name, amount: parseFloat(amount), period, categoryId: parseInt(categoryId) })
-      .returning();
+    if (!name || typeof name !== "string" || !name.trim()) { res.status(400).json({ error: "name is required" }); return; }
+    if (!isPositiveNumber(amount)) { res.status(400).json({ error: "amount must be a positive number" }); return; }
+    if (!["daily", "weekly", "monthly", "yearly"].includes(period)) { res.status(400).json({ error: "period must be one of daily, weekly, monthly, yearly" }); return; }
+    const catId = parseInt(categoryId);
+    if (!Number.isInteger(catId)) { res.status(400).json({ error: "categoryId is required" }); return; }
+    if (!(await isCategoryUsableByUser(catId, req.userId!))) { res.status(400).json({ error: "Invalid category" }); return; }
 
-    res.status(201).json(await computeBudgetProgress(budget, req.userId!));
+    const budget = await prisma.budget.create({
+      data: { userId: req.userId!, name: name.trim(), amount: Number(amount), period, categoryId: catId },
+      include: { category: { select: { name: true, icon: true } } },
+    });
+    const [withProgress] = await attachProgress([budget], req.userId!);
+    res.status(201).json(withProgress);
   } catch (err) {
     logger.error({ err }, "Create budget error");
     res.status(500).json({ error: "Failed to create budget" });
   }
 });
 
-router.patch("/:id", requireAuth, async (req: AuthRequest, res) => {
+async function updateBudgetHandler(req: AuthRequest, res: Response) {
   try {
     const id = parseInt(req.params.id);
+    if (!Number.isInteger(id)) { res.status(400).json({ error: "Invalid budget id" }); return; }
+
+    const existing = await prisma.budget.findFirst({ where: { id, userId: req.userId! }, select: { id: true } });
+    if (!existing) { res.status(404).json({ error: "Budget not found" }); return; }
+
     const { name, amount, period, categoryId } = req.body;
-    const updates: Record<string, unknown> = { updatedAt: new Date() };
-    if (name) updates.name = name;
-    if (amount) updates.amount = parseFloat(amount);
-    if (period) updates.period = period;
-    if (categoryId) updates.categoryId = parseInt(categoryId);
+    const data: Record<string, any> = {};
 
-    const [budget] = await db
-      .update(budgetsTable)
-      .set(updates)
-      .where(and(eq(budgetsTable.id, id), eq(budgetsTable.userId, req.userId!)))
-      .returning();
-
-    if (!budget) {
-      res.status(404).json({ error: "Budget not found" });
-      return;
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) { res.status(400).json({ error: "name cannot be empty" }); return; }
+      data.name = name.trim();
     }
-    res.json(await computeBudgetProgress(budget, req.userId!));
+    if (amount !== undefined) {
+      if (!isPositiveNumber(amount)) { res.status(400).json({ error: "amount must be a positive number" }); return; }
+      data.amount = Number(amount);
+    }
+    if (period !== undefined) {
+      if (!["daily", "weekly", "monthly", "yearly"].includes(period)) { res.status(400).json({ error: "Invalid period" }); return; }
+      data.period = period;
+    }
+    if (categoryId !== undefined) {
+      const catId = parseInt(categoryId);
+      if (!Number.isInteger(catId) || !(await isCategoryUsableByUser(catId, req.userId!))) { res.status(400).json({ error: "Invalid category" }); return; }
+      data.categoryId = catId;
+    }
+
+    const budget = await prisma.budget.update({
+      where: { id },
+      data,
+      include: { category: { select: { name: true, icon: true } } },
+    });
+    const [withProgress] = await attachProgress([budget], req.userId!);
+    res.json(withProgress);
   } catch (err) {
     logger.error({ err }, "Update budget error");
     res.status(500).json({ error: "Failed to update budget" });
   }
-});
+}
+
+router.patch("/:id", requireAuth, updateBudgetHandler);
+router.put("/:id", requireAuth, updateBudgetHandler);
 
 router.delete("/:id", requireAuth, async (req: AuthRequest, res) => {
   try {
     const id = parseInt(req.params.id);
-    await db.delete(budgetsTable).where(and(eq(budgetsTable.id, id), eq(budgetsTable.userId, req.userId!)));
+    if (!Number.isInteger(id)) { res.status(400).json({ error: "Invalid budget id" }); return; }
+
+    const existing = await prisma.budget.findFirst({ where: { id, userId: req.userId! }, select: { id: true } });
+    if (!existing) { res.status(404).json({ error: "Budget not found" }); return; }
+
+    await prisma.budget.delete({ where: { id } });
     res.json({ success: true, message: "Budget deleted" });
   } catch (err) {
     logger.error({ err }, "Delete budget error");

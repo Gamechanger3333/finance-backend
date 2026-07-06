@@ -1,0 +1,127 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                     Int       @id @default(autoincrement())
+  name                   String
+  email                  String    @unique
+  passwordHash           String    @map("password_hash")
+  userType               String    @default("individual") @map("user_type")
+  currency               String    @default("USD")
+  monthlyIncomeGoal      Float?    @map("monthly_income_goal")
+  financialHealthScore   Int?      @default(0) @map("financial_health_score")
+
+  // Email verification
+  emailVerified          Boolean   @default(false) @map("email_verified")
+  verificationTokenHash  String?   @map("verification_token_hash")
+  verificationOtpHash    String?   @map("verification_otp_hash")
+  verificationExpiresAt  DateTime? @map("verification_expires_at")
+  verificationAttempts   Int       @default(0) @map("verification_attempts")
+  lastVerificationSentAt DateTime? @map("last_verification_sent_at")
+
+  // Password reset
+  resetTokenHash  String?   @map("reset_token_hash")
+  resetOtpHash    String?   @map("reset_otp_hash")
+  resetExpiresAt  DateTime? @map("reset_expires_at")
+  resetAttempts   Int       @default(0) @map("reset_attempts")
+  lastResetSentAt DateTime? @map("last_reset_sent_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @default(now()) @updatedAt @map("updated_at")
+
+  transactions  Transaction[]
+  budgets       Budget[]
+  goals         Goal[]
+  notifications Notification[]
+  categories    Category[]
+
+  @@map("users")
+}
+
+model Category {
+  id        Int     @id @default(autoincrement())
+  name      String
+  icon      String  @default("circle")
+  type      String  // "income" | "expense" | "both"
+  color     String  @default("#6366f1")
+  isDefault Boolean @default(false) @map("is_default")
+  userId    Int?    @map("user_id")
+
+  user         User?         @relation(fields: [userId], references: [id])
+  transactions Transaction[]
+  budgets      Budget[]
+
+  @@map("categories")
+}
+
+model Transaction {
+  id          Int      @id @default(autoincrement())
+  userId      Int      @map("user_id")
+  type        String   // "income" | "expense"
+  amount      Float
+  description String   @default("")
+  date        String   // YYYY-MM-DD stored as string for easy filtering
+  categoryId  Int      @map("category_id")
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User     @relation(fields: [userId], references: [id])
+  category Category @relation(fields: [categoryId], references: [id])
+
+  @@map("transactions")
+}
+
+model Budget {
+  id         Int      @id @default(autoincrement())
+  userId     Int      @map("user_id")
+  name       String
+  amount     Float
+  period     String   // "daily" | "weekly" | "monthly" | "yearly"
+  categoryId Int      @map("category_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user     User     @relation(fields: [userId], references: [id])
+  category Category @relation(fields: [categoryId], references: [id])
+
+  @@map("budgets")
+}
+
+model Goal {
+  id            Int      @id @default(autoincrement())
+  userId        Int      @map("user_id")
+  name          String
+  targetAmount  Float    @map("target_amount")
+  currentAmount Float    @default(0) @map("current_amount")
+  deadline      String   // YYYY-MM-DD
+  type          String
+  notes         String?
+  isCompleted   Boolean  @default(false) @map("is_completed")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("goals")
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  title     String
+  message   String
+  type      String   @default("info")
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("notifications")
+}

@@ -1,22 +1,12 @@
-import { drizzle } from "drizzle-orm/node-postgres";
-import pg from "pg";
-import * as schema from "./schema.js";
+import { PrismaClient } from "@prisma/client";
 
-const { Pool } = pg;
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient };
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL environment variable is required");
-}
+// Singleton pattern — reuses the same client instance instead of creating
+// a new connection pool on every hot-reload during development.
+export const prisma =
+  globalForPrisma.prisma ?? new PrismaClient({ log: ["error", "warn"] });
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
 
-export const db = drizzle(pool, { schema });
-
-export const {
-  usersTable,
-  categoriesTable,
-  transactionsTable,
-  budgetsTable,
-  goalsTable,
-  notificationsTable,
-} = schema;
+export default prisma;
