@@ -57,6 +57,7 @@ model Category {
   transactions Transaction[]
   budgets      Budget[]
 
+  @@index([userId])
   @@map("categories")
 }
 
@@ -75,6 +76,8 @@ model Transaction {
   user     User     @relation(fields: [userId], references: [id])
   category Category @relation(fields: [categoryId], references: [id])
 
+  @@index([userId, date])
+  @@index([categoryId])
   @@map("transactions")
 }
 
@@ -91,6 +94,8 @@ model Budget {
   user     User     @relation(fields: [userId], references: [id])
   category Category @relation(fields: [categoryId], references: [id])
 
+  @@index([userId])
+  @@index([categoryId])
   @@map("budgets")
 }
 
@@ -109,6 +114,7 @@ model Goal {
 
   user User @relation(fields: [userId], references: [id])
 
+  @@index([userId])
   @@map("goals")
 }
 
@@ -123,5 +129,6 @@ model Notification {
 
   user User @relation(fields: [userId], references: [id])
 
+  @@index([userId, createdAt])
   @@map("notifications")
 }

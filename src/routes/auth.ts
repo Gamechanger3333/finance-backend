@@ -44,10 +44,6 @@ function sanitizeUser(user: any) {
   };
 }
 
-function escapeHtml(str: string): string {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 async function issueVerificationChallenge(user: any) {

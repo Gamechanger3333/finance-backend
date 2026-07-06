@@ -67,7 +67,10 @@ async function updateGoalHandler(req: AuthRequest, res: Response) {
     const { name, targetAmount, currentAmount, deadline, type, notes, isCompleted } = req.body;
     const data: Record<string, any> = {};
 
-    if (name !== undefined) { data.name = name.trim(); }
+    if (name !== undefined) {
+      if (typeof name !== "string" || !name.trim()) { res.status(400).json({ error: "name cannot be empty" }); return; }
+      data.name = name.trim();
+    }
     if (targetAmount !== undefined) { data.targetAmount = Number(targetAmount); }
     if (currentAmount !== undefined) { data.currentAmount = Number(currentAmount); }
     if (deadline !== undefined) { data.deadline = deadline; }

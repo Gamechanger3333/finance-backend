@@ -41,6 +41,15 @@ router.get("/", requireAuth, async (req: AuthRequest, res) => {
     if (type === "income" || type === "expense") where.type = type;
     if (startDate) where.date = { ...(where.date ?? {}), gte: startDate };
     if (endDate) where.date = { ...(where.date ?? {}), lte: endDate };
+    // Search is applied at the DB level (not after take/skip) so results aren't
+    // silently limited to whichever page happened to be fetched.
+    if (search) {
+      where.OR = [
+        { description: { contains: search, mode: "insensitive" } },
+        { notes: { contains: search, mode: "insensitive" } },
+        { category: { name: { contains: search, mode: "insensitive" } } },
+      ];
+    }
 
     const transactions = await prisma.transaction.findMany({
       where,
@@ -50,13 +59,7 @@ router.get("/", requireAuth, async (req: AuthRequest, res) => {
       skip,
     });
 
-    const filtered = search
-      ? transactions.filter((t: any) =>
-          `${t.description} ${t.category?.name ?? ""}`.toLowerCase().includes(search.toLowerCase())
-        )
-      : transactions;
-
-    res.json(filtered.map(serializeTx));
+    res.json(transactions.map(serializeTx));
   } catch (err) {
     logger.error({ err }, "List transactions error");
     res.status(500).json({ error: "Failed to fetch transactions" });

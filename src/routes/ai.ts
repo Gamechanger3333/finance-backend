@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
@@ -6,10 +7,50 @@ import Groq from "groq-sdk";
 
 const router = Router();
 
+// AI calls cost real money/tokens per request — these routes had no rate
+// limiting at all before, unlike every other route in the app.
+const aiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: "Too many AI requests, please try again in a few minutes" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const landingChatLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many requests, please try again in a few minutes" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const MAX_MESSAGE_LENGTH = 1000;
+const MAX_HISTORY_TURNS = 6;
+
 function getGroq() {
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) throw new Error("GROQ_API_KEY not set");
   return new Groq({ apiKey });
+}
+
+/**
+ * Sanitizes a client-supplied chat history array into a bounded list of
+ * {role, content} pairs the model can consume. Keeps only the last
+ * MAX_HISTORY_TURNS turns so a single conversation can't grow the prompt
+ * (and therefore the API bill) without limit.
+ */
+function sanitizeHistory(history: unknown): { role: "user" | "assistant"; content: string }[] {
+  if (!Array.isArray(history)) return [];
+  const cleaned = history
+    .filter(
+      (m: any) =>
+        m &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string" &&
+        m.content.trim().length > 0
+    )
+    .map((m: any) => ({ role: m.role, content: String(m.content).slice(0, MAX_MESSAGE_LENGTH) }));
+  return cleaned.slice(-MAX_HISTORY_TURNS * 2);
 }
 
 async function getUserFinancialContext(userId: number) {
@@ -35,7 +76,7 @@ async function getUserFinancialContext(userId: number) {
   };
 }
 
-router.get("/insights", requireAuth, async (req: AuthRequest, res) => {
+router.get("/insights", aiLimiter, requireAuth, async (req: AuthRequest, res) => {
   try {
     const ctx = await getUserFinancialContext(req.userId!);
     const prompt = `You are an expert financial advisor. Based on this user's financial data, generate actionable insights.
@@ -93,10 +134,17 @@ Respond with a JSON object (no markdown, raw JSON only) with this exact structur
   }
 });
 
-router.post("/chat", requireAuth, async (req: AuthRequest, res) => {
+router.post("/chat", aiLimiter, requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { message } = req.body;
-    if (!message) { res.status(400).json({ error: "message required" }); return; }
+    const { message, history } = req.body;
+    if (!message || typeof message !== "string" || !message.trim()) {
+      res.status(400).json({ error: "message required" });
+      return;
+    }
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      res.status(400).json({ error: `message must be under ${MAX_MESSAGE_LENGTH} characters` });
+      return;
+    }
 
     const ctx = await getUserFinancialContext(req.userId!);
     const systemPrompt = `You are FinFlow AI, an expert personal finance assistant. You have access to the user's financial data:
@@ -107,12 +155,20 @@ router.post("/chat", requireAuth, async (req: AuthRequest, res) => {
 - Budgets: ${ctx.budgets.map((b: any) => b.name).join(", ") || "None set"}
 Be specific, actionable, and concise. Keep responses under 150 words.`;
 
+    // Conversation history lets the assistant hold a real multi-turn
+    // conversation instead of treating every message as a cold start.
+    const priorTurns = sanitizeHistory(history);
+
     let reply: string;
     try {
       const groq = getGroq();
       const completion = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        messages: [{ role: "system", content: systemPrompt }, { role: "user", content: message }],
+        messages: [
+          { role: "system", content: systemPrompt },
+          ...priorTurns,
+          { role: "user", content: message },
+        ],
         max_tokens: 300,
         temperature: 0.7,
       });
@@ -129,6 +185,69 @@ Be specific, actionable, and concise. Keep responses under 150 words.`;
   } catch (err) {
     logger.error({ err }, "AI chat error");
     res.json({ reply: "I'm your AI financial assistant. What would you like to know?", suggestions: ["How can I save more money?", "What expenses should I cut?"] });
+  }
+});
+
+// ─── Public landing-page assistant ───────────────────────────────────────────
+// Unauthenticated visitors browsing the marketing site get a lightweight
+// assistant that can answer product/pricing/general-finance questions. It
+// never touches user financial data (there is no logged-in user yet), and is
+// rate-limited more tightly than the in-app assistant since it's open to the
+// public internet.
+const LANDING_SYSTEM_PROMPT = `You are the FinFlow website assistant, greeting visitors on the public marketing/landing page (they are not logged in yet).
+FinFlow is a personal finance app with: smart analytics dashboards, an AI financial advisor (powered by Llama 3.3 via Groq), budget management with overspend alerts, goal tracking, automatic transaction categorization, and bank-level security. Plans: Free ($0, 50 tx/month, 3 budget categories, 10 AI chats/day), Pro ($9/mo, unlimited everything), Business ($29/mo, adds team seats + API access).
+Answer questions about the product, pricing, and general personal-finance/budgeting topics. Encourage visitors to create a free account or try the demo login when relevant, but don't be pushy. You do not have access to any specific person's financial data — if asked about "my" transactions/budgets, explain that this becomes available after signing in. Keep answers under 80 words and friendly.`;
+
+router.post("/landing-chat", landingChatLimiter, async (req, res) => {
+  try {
+    const { message, history } = req.body;
+    if (!message || typeof message !== "string" || !message.trim()) {
+      res.status(400).json({ error: "message required" });
+      return;
+    }
+    if (message.length > MAX_MESSAGE_LENGTH) {
+      res.status(400).json({ error: `message must be under ${MAX_MESSAGE_LENGTH} characters` });
+      return;
+    }
+
+    const priorTurns = sanitizeHistory(history);
+    let reply: string;
+    try {
+      const groq = getGroq();
+      const completion = await groq.chat.completions.create({
+        model: "llama-3.3-70b-versatile",
+        messages: [
+          { role: "system", content: LANDING_SYSTEM_PROMPT },
+          ...priorTurns,
+          { role: "user", content: message },
+        ],
+        max_tokens: 220,
+        temperature: 0.6,
+      });
+      reply =
+        completion.choices[0]?.message?.content ??
+        "I'm having trouble connecting right now — please try again in a moment.";
+    } catch (aiErr) {
+      logger.warn({ aiErr }, "Groq landing chat failed");
+      reply =
+        "I'm the FinFlow assistant! I can tell you about our AI budgeting tools, pricing plans, or general saving tips — what would you like to know?";
+    }
+
+    res.json({
+      reply,
+      suggestions: [
+        "What does FinFlow cost?",
+        "How does the AI advisor work?",
+        "Is my data secure?",
+        "How do I get started?",
+      ],
+    });
+  } catch (err) {
+    logger.error({ err }, "Landing chat error");
+    res.json({
+      reply: "Hi! I'm the FinFlow assistant. Ask me about features, pricing, or budgeting tips.",
+      suggestions: ["What does FinFlow cost?", "How does the AI advisor work?"],
+    });
   }
 });
 
