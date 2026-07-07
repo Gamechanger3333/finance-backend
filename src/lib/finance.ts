@@ -2,6 +2,67 @@ import prisma from "../db/index.js";
 
 export type Period = "daily" | "weekly" | "monthly" | "yearly";
 
+/**
+ * Advances a YYYY-MM-DD date string by one period of the given frequency.
+ * Used to roll a recurring bill's due date forward once it's been paid.
+ */
+export function advanceDate(dateStr: string, frequency: "weekly" | "monthly" | "yearly"): string {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, m - 1, d);
+  if (frequency === "weekly") date.setDate(date.getDate() + 7);
+  else if (frequency === "yearly") date.setFullYear(date.getFullYear() + 1);
+  else date.setMonth(date.getMonth() + 1); // monthly (default)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * Whole-day difference between a YYYY-MM-DD date and today (negative = overdue).
+ */
+export function daysUntil(dateStr: string, now: Date = new Date()): number {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const due = new Date(y, m - 1, d);
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Lazily checks a user's active recurring bills for anything due within 3
+ * days (or already overdue) and creates a notification the first time we
+ * notice — tracked via lastNotifiedDueDate so it doesn't fire again for the
+ * same due date. Runs on read (bills list / dashboard load) rather than a
+ * background cron, which is a deliberate trade-off for this app's current
+ * scale; a scheduled job would be the right move once this runs for real
+ * users at volume.
+ */
+export async function checkAndNotifyDueBills(userId: number): Promise<void> {
+  const bills = await prisma.recurringBill.findMany({ where: { userId, isActive: true } });
+  for (const bill of bills) {
+    const days = daysUntil(bill.nextDueDate);
+    if (days > 3) continue;
+    if (bill.lastNotifiedDueDate === bill.nextDueDate) continue;
+
+    const title =
+      days < 0
+        ? `${bill.name} is overdue`
+        : days === 0
+        ? `${bill.name} is due today`
+        : `${bill.name} is due in ${days} day${days === 1 ? "" : "s"}`;
+
+    await prisma.notification.create({
+      data: {
+        userId,
+        title,
+        message: `$${bill.amount.toFixed(2)} · ${bill.frequency} bill`,
+        type: days < 0 ? "warning" : "info",
+      },
+    });
+    await prisma.recurringBill.update({
+      where: { id: bill.id },
+      data: { lastNotifiedDueDate: bill.nextDueDate },
+    });
+  }
+}
+
 export function getPeriodRange(period: string, now: Date = new Date()): { startDate: string; endDate: string } {
   if (period === "weekly") {
     const day = now.getDay();

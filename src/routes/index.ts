@@ -7,6 +7,7 @@ import goalsRouter from "./goals.js";
 import categoriesRouter from "./categories.js";
 import aiRouter from "./ai.js";
 import notificationsRouter from "./notifications.js";
+import recurringBillsRouter from "./recurring-bills.js";
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use("/goals", goalsRouter);
 router.use("/categories", categoriesRouter);
 router.use("/ai", aiRouter);
 router.use("/notifications", notificationsRouter);
+router.use("/recurring-bills", recurringBillsRouter);
 
 export default router;

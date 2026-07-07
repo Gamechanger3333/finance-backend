@@ -2,7 +2,7 @@ import { Router } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
-import { getPeriodRange, getExpenseSpendByCategory, getMonthlyCashflow } from "../lib/finance.js";
+import { getPeriodRange, getExpenseSpendByCategory, getMonthlyCashflow, checkAndNotifyDueBills, daysUntil } from "../lib/finance.js";
 
 const router = Router();
 
@@ -28,12 +28,17 @@ router.get("/summary", requireAuth, async (req: AuthRequest, res) => {
     const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonth = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, "0")}`;
 
+    // Fire off any due/overdue bill reminders (creates Notification rows) —
+    // this is our lazy substitute for a background cron.
+    await checkAndNotifyDueBills(userId);
+
     const [{ income: monthlyIncome, expenses: monthlyExpenses }, { income: lastIncome, expenses: lastExpenses }] =
       await Promise.all([getMonthTotals(userId, thisMonth), getMonthTotals(userId, lastMonth)]);
 
-    const [budgets, goals] = await Promise.all([
+    const [budgets, goals, upcomingBillsRaw] = await Promise.all([
       prisma.budget.findMany({ where: { userId }, include: { category: { select: { name: true } } } }),
       prisma.goal.findMany({ where: { userId } }),
+      prisma.recurringBill.findMany({ where: { userId, isActive: true }, orderBy: { nextDueDate: "asc" }, take: 5 }),
     ]);
 
     const activeGoals = goals.filter((g: any) => !g.isCompleted).length;
@@ -60,6 +65,15 @@ router.get("/summary", requireAuth, async (req: AuthRequest, res) => {
       type: g.type,
     }));
 
+    const upcomingBills = upcomingBillsRaw.map((b: any) => ({
+      id: b.id,
+      name: b.name,
+      amount: b.amount,
+      frequency: b.frequency,
+      nextDueDate: b.nextDueDate,
+      daysUntilDue: daysUntil(b.nextDueDate),
+    }));
+
     res.json({
       monthlyIncome,
       monthlyExpenses,
@@ -68,6 +82,7 @@ router.get("/summary", requireAuth, async (req: AuthRequest, res) => {
       activeGoals,
       budgetSummary,
       goalsSummary,
+      upcomingBills,
       incomeChange: lastIncome > 0 ? ((monthlyIncome - lastIncome) / lastIncome) * 100 : 0,
       expenseChange: lastExpenses > 0 ? ((monthlyExpenses - lastExpenses) / lastExpenses) * 100 : 0,
     });
