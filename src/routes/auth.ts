@@ -38,6 +38,7 @@ function sanitizeUser(user: any) {
     userType: user.userType,
     currency: user.currency,
     monthlyIncomeGoal: user.monthlyIncomeGoal,
+    currentBalance: user.currentBalance,
     financialHealthScore: user.financialHealthScore,
     emailVerified: user.emailVerified,
     createdAt: user.createdAt instanceof Date ? user.createdAt.toISOString() : user.createdAt,
@@ -289,7 +290,7 @@ router.get("/me", profileLimiter, requireAuth, async (req: AuthRequest, res) => 
 // PUT + PATCH /api/auth/profile
 async function updateProfileHandler(req: AuthRequest, res: any) {
   try {
-    const { name, currency, monthlyIncomeGoal } = req.body;
+    const { name, currency, monthlyIncomeGoal, currentBalance } = req.body;
     const data: Record<string, any> = {};
     if (name !== undefined) {
       if (typeof name !== "string" || name.trim().length < 2) { res.status(400).json({ error: "Name must be at least 2 characters" }); return; }
@@ -297,6 +298,13 @@ async function updateProfileHandler(req: AuthRequest, res: any) {
     }
     if (currency !== undefined) data.currency = currency;
     if (monthlyIncomeGoal !== undefined) data.monthlyIncomeGoal = monthlyIncomeGoal;
+    if (currentBalance !== undefined) {
+      if (currentBalance !== null && !Number.isFinite(Number(currentBalance))) {
+        res.status(400).json({ error: "currentBalance must be a number" });
+        return;
+      }
+      data.currentBalance = currentBalance === null ? null : Number(currentBalance);
+    }
 
     const user = await prisma.user.update({ where: { id: req.userId! }, data });
     res.json(sanitizeUser(user));

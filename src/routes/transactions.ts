@@ -2,6 +2,7 @@ import { Router, Response } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
+import { applyRoundUpRules, applyIncomeRules } from "../lib/savings.js";
 
 const router = Router();
 const MAX_PAGE_SIZE = 200;
@@ -68,7 +69,7 @@ router.get("/", requireAuth, async (req: AuthRequest, res) => {
 
 router.post("/", requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { type, amount, description, date, categoryId, notes } = req.body;
+    const { type, amount, description, date, categoryId, notes, source, receiptText } = req.body;
 
     if (type !== "income" && type !== "expense") { res.status(400).json({ error: "type must be 'income' or 'expense'" }); return; }
     if (!isPositiveNumber(amount)) { res.status(400).json({ error: "amount must be a positive number" }); return; }
@@ -76,13 +77,24 @@ router.post("/", requireAuth, async (req: AuthRequest, res) => {
     const catId = parseInt(categoryId);
     if (!Number.isInteger(catId)) { res.status(400).json({ error: "categoryId is required" }); return; }
     if (!(await isCategoryUsableByUser(catId, req.userId!))) { res.status(400).json({ error: "Invalid category" }); return; }
+    if (source !== undefined && !["manual", "ocr", "bank_sync"].includes(source)) { res.status(400).json({ error: "Invalid source" }); return; }
 
     const tx = await prisma.transaction.create({
-      data: { userId: req.userId!, type, amount: Number(amount), description: description || "", date, categoryId: catId, notes },
+      data: {
+        userId: req.userId!, type, amount: Number(amount), description: description || "", date, categoryId: catId, notes,
+        source: source || "manual",
+        receiptText: receiptText || undefined,
+      },
       include: { category: { select: { name: true, icon: true } } },
     });
 
-    res.status(201).json(serializeTx(tx));
+    // Fire any matching automated savings rules — notional transfers that
+    // don't touch the ledger, just earmark progress toward a goal.
+    const savingsApplied = type === "expense"
+      ? await applyRoundUpRules(req.userId!, Number(amount))
+      : await applyIncomeRules(req.userId!, Number(amount));
+
+    res.status(201).json({ ...serializeTx(tx), savingsApplied });
   } catch (err) {
     logger.error({ err }, "Create transaction error");
     res.status(500).json({ error: "Failed to create transaction" });

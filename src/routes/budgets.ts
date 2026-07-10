@@ -2,7 +2,7 @@ import { Router, Response } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
-import { getPeriodRange, getExpenseSpendByCategory } from "../lib/finance.js";
+import { getPeriodRange, getExpenseSpendByCategory, checkAndNotifyBudgetOverspend } from "../lib/finance.js";
 
 const router = Router();
 
@@ -56,6 +56,7 @@ async function attachProgress(budgets: any[], userId: number) {
 
 router.get("/", requireAuth, async (req: AuthRequest, res) => {
   try {
+    await checkAndNotifyBudgetOverspend(req.userId!);
     const budgets = await prisma.budget.findMany({
       where: { userId: req.userId! },
       include: { category: { select: { name: true, icon: true } } },

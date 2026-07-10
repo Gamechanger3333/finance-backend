@@ -35,4 +35,14 @@ router.patch("/:id/read", requireAuth, async (req: AuthRequest, res) => {
   }
 });
 
+router.patch("/read-all", requireAuth, async (req: AuthRequest, res) => {
+  try {
+    await prisma.notification.updateMany({ where: { userId: req.userId!, isRead: false }, data: { isRead: true } });
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ err }, "Mark all notifications read error");
+    res.status(500).json({ error: "Failed to update notifications" });
+  }
+});
+
 export default router;

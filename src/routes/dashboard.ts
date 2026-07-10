@@ -2,7 +2,8 @@ import { Router } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
-import { getPeriodRange, getExpenseSpendByCategory, getMonthlyCashflow, checkAndNotifyDueBills, daysUntil } from "../lib/finance.js";
+import { getPeriodRange, getExpenseSpendByCategory, getMonthlyCashflow, checkAndNotifyDueBills, checkAndNotifyOverdraftRisk, checkAndNotifyBudgetOverspend, getCashflowForecast, daysUntil } from "../lib/finance.js";
+import { runDueFixedSavingsRules } from "../lib/savings.js";
 
 const router = Router();
 
@@ -28,17 +29,21 @@ router.get("/summary", requireAuth, async (req: AuthRequest, res) => {
     const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonth = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, "0")}`;
 
-    // Fire off any due/overdue bill reminders (creates Notification rows) —
-    // this is our lazy substitute for a background cron.
-    await checkAndNotifyDueBills(userId);
+    // Fire off any due/overdue bill reminders and projected-overdraft
+    // warnings (creates Notification rows) — this is our lazy substitute
+    // for a background cron.
+    await Promise.all([checkAndNotifyDueBills(userId), checkAndNotifyOverdraftRisk(userId), runDueFixedSavingsRules(userId), checkAndNotifyBudgetOverspend(userId)]);
 
     const [{ income: monthlyIncome, expenses: monthlyExpenses }, { income: lastIncome, expenses: lastExpenses }] =
       await Promise.all([getMonthTotals(userId, thisMonth), getMonthTotals(userId, lastMonth)]);
 
-    const [budgets, goals, upcomingBillsRaw] = await Promise.all([
+    const [budgets, goals, upcomingBillsRaw, forecastGlance, debts, activeSavingsRules] = await Promise.all([
       prisma.budget.findMany({ where: { userId }, include: { category: { select: { name: true } } } }),
       prisma.goal.findMany({ where: { userId } }),
       prisma.recurringBill.findMany({ where: { userId, isActive: true }, orderBy: { nextDueDate: "asc" }, take: 5 }),
+      getCashflowForecast(userId, 30),
+      prisma.debt.findMany({ where: { userId, isPaidOff: false }, select: { balance: true } }),
+      prisma.savingsRule.findMany({ where: { userId, isActive: true }, select: { totalSaved: true } }),
     ]);
 
     const activeGoals = goals.filter((g: any) => !g.isCompleted).length;
@@ -83,6 +88,20 @@ router.get("/summary", requireAuth, async (req: AuthRequest, res) => {
       budgetSummary,
       goalsSummary,
       upcomingBills,
+      cashflowGlance: {
+        startingBalance: forecastGlance.startingBalance,
+        startingBalanceIsEstimate: forecastGlance.startingBalanceIsEstimate,
+        lowestPoint: forecastGlance.lowestPoint,
+        overdraftDate: forecastGlance.overdraftDate,
+      },
+      debtSummary: {
+        totalBalance: debts.reduce((s: number, d: any) => s + d.balance, 0),
+        debtCount: debts.length,
+      },
+      savingsRulesSummary: {
+        totalSaved: activeSavingsRules.reduce((s: number, r: any) => s + r.totalSaved, 0),
+        activeRuleCount: activeSavingsRules.length,
+      },
       incomeChange: lastIncome > 0 ? ((monthlyIncome - lastIncome) / lastIncome) * 100 : 0,
       expenseChange: lastExpenses > 0 ? ((monthlyExpenses - lastExpenses) / lastExpenses) * 100 : 0,
     });

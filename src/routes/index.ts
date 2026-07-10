@@ -8,6 +8,12 @@ import categoriesRouter from "./categories.js";
 import aiRouter from "./ai.js";
 import notificationsRouter from "./notifications.js";
 import recurringBillsRouter from "./recurring-bills.js";
+import cashflowForecastRouter from "./cashflow-forecast.js";
+import debtsRouter from "./debts.js";
+import savingsRulesRouter from "./savings-rules.js";
+import reportsRouter from "./reports.js";
+import householdRouter from "./household.js";
+import bankSyncRouter from "./bank-sync.js";
 
 const router = Router();
 
@@ -24,5 +30,11 @@ router.use("/categories", categoriesRouter);
 router.use("/ai", aiRouter);
 router.use("/notifications", notificationsRouter);
 router.use("/recurring-bills", recurringBillsRouter);
+router.use("/cashflow-forecast", cashflowForecastRouter);
+router.use("/debts", debtsRouter);
+router.use("/savings-rules", savingsRulesRouter);
+router.use("/reports", reportsRouter);
+router.use("/household", householdRouter);
+router.use("/bank-sync", bankSyncRouter);
 
 export default router;

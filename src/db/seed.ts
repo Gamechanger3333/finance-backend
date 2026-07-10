@@ -15,6 +15,7 @@ const DEFAULT_CATEGORIES = [
   { name: "Bills & Utilities", icon: "zap", type: "expense", color: "#6366f1" },
   { name: "Healthcare", icon: "heart", type: "expense", color: "#14b8a6" },
   { name: "Education", icon: "book", type: "expense", color: "#84cc16" },
+  { name: "Savings", icon: "piggy-bank", type: "expense", color: "#10b981" },
   { name: "Other", icon: "circle", type: "expense", color: "#6b7280" },
 ];
 

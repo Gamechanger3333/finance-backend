@@ -16,6 +16,10 @@ model User {
   currency               String    @default("USD")
   monthlyIncomeGoal      Float?    @map("monthly_income_goal")
   financialHealthScore   Int?      @default(0) @map("financial_health_score")
+  // Optional user-supplied "as of today" account balance used as the
+  // starting point for cash-flow forecasting. When null, the forecast
+  // falls back to the running sum of all historical transactions.
+  currentBalance         Float?    @map("current_balance")
 
   // Email verification
   emailVerified          Boolean   @default(false) @map("email_verified")
@@ -41,6 +45,14 @@ model User {
   notifications Notification[]
   categories    Category[]
   recurringBills RecurringBill[]
+  debts         Debt[]
+  savingsRules  SavingsRule[]
+  savingsContributions SavingsContribution[]
+  ownedHouseholds       Household[]           @relation("HouseholdOwner")
+  householdMemberships  HouseholdMember[]     @relation("HouseholdMembership")
+  paidSharedExpenses    SharedExpense[]       @relation("PaidExpenses")
+  expenseSplits         SharedExpenseSplit[]  @relation("ExpenseSplits")
+  bankConnections       BankConnection[]
 
   @@map("users")
 }
@@ -72,6 +84,11 @@ model Transaction {
   date        String   // YYYY-MM-DD stored as string for easy filtering
   categoryId  Int      @map("category_id")
   notes       String?
+  // "manual" | "ocr" (from a scanned receipt) | "bank_sync" (imported from a linked account)
+  source      String   @default("manual")
+  // Raw OCR text kept for the receipt-scan flow, so a mis-parsed field can
+  // be corrected by re-reading the original text rather than re-scanning.
+  receiptText String?  @map("receipt_text")
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @default(now()) @updatedAt @map("updated_at")
 
@@ -115,6 +132,7 @@ model Goal {
   updatedAt     DateTime @default(now()) @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id])
+  savingsRules SavingsRule[]
 
   @@index([userId])
   @@map("goals")
@@ -159,4 +177,166 @@ model RecurringBill {
   @@index([userId])
   @@index([userId, nextDueDate])
   @@map("recurring_bills")
+}
+
+model Debt {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @map("user_id")
+  name            String
+  debtType        String   @default("other") @map("debt_type") // "credit_card" | "student_loan" | "auto_loan" | "personal_loan" | "mortgage" | "other"
+  balance         Float
+  interestRate    Float    @default(0) @map("interest_rate") // APR, percent (e.g. 19.99)
+  minimumPayment  Float    @map("minimum_payment")
+  isPaidOff       Boolean  @default(false) @map("is_paid_off")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("debts")
+}
+
+model SavingsRule {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  name         String
+  type         String   // "round_up" | "percent_of_income" | "fixed_recurring"
+  goalId       Int      @map("goal_id")
+  // "round_up": nearest amount to round expenses up to, e.g. 1, 5, 10
+  roundUpTo    Float?   @map("round_up_to")
+  // "percent_of_income": 0-100, applied to each income transaction
+  percentage   Float?
+  // "fixed_recurring": moves a fixed amount on a schedule, like a bill to yourself
+  fixedAmount  Float?   @map("fixed_amount")
+  frequency    String?  // "weekly" | "monthly" — fixed_recurring only
+  nextRunDate  String?  @map("next_run_date") // YYYY-MM-DD — fixed_recurring only
+  isActive     Boolean  @default(true) @map("is_active")
+  // Running total this rule has ever contributed, for an at-a-glance impact figure.
+  totalSaved   Float    @default(0) @map("total_saved")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @default(now()) @updatedAt @map("updated_at")
+
+  user          User                   @relation(fields: [userId], references: [id])
+  goal          Goal                   @relation(fields: [goalId], references: [id])
+  contributions SavingsContribution[]
+
+  @@index([userId])
+  @@map("savings_rules")
+}
+
+model SavingsContribution {
+  id            Int      @id @default(autoincrement())
+  userId        Int      @map("user_id")
+  savingsRuleId Int      @map("savings_rule_id")
+  amount        Float
+  note          String?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  user User        @relation(fields: [userId], references: [id])
+  rule SavingsRule @relation(fields: [savingsRuleId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([savingsRuleId])
+  @@map("savings_contributions")
+}
+
+// ─── Family / shared budgets ───────────────────────────────────────────────
+
+model Household {
+  id         Int      @id @default(autoincrement())
+  name       String
+  ownerId    Int      @map("owner_id")
+  inviteCode String   @unique @map("invite_code")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  owner    User              @relation("HouseholdOwner", fields: [ownerId], references: [id])
+  members  HouseholdMember[]
+  expenses SharedExpense[]
+
+  @@map("households")
+}
+
+model HouseholdMember {
+  id          Int      @id @default(autoincrement())
+  householdId Int      @map("household_id")
+  userId      Int      @map("user_id")
+  role        String   @default("member") // "owner" | "member"
+  joinedAt    DateTime @default(now()) @map("joined_at")
+
+  household Household @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  user      User      @relation("HouseholdMembership", fields: [userId], references: [id])
+
+  @@unique([householdId, userId])
+  @@index([userId])
+  @@map("household_members")
+}
+
+model SharedExpense {
+  id           Int      @id @default(autoincrement())
+  householdId  Int      @map("household_id")
+  paidByUserId Int      @map("paid_by_user_id")
+  description  String
+  amount       Float
+  date         String   // YYYY-MM-DD
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  household Household             @relation(fields: [householdId], references: [id], onDelete: Cascade)
+  paidBy    User                  @relation("PaidExpenses", fields: [paidByUserId], references: [id])
+  splits    SharedExpenseSplit[]
+
+  @@index([householdId])
+  @@map("shared_expenses")
+}
+
+model SharedExpenseSplit {
+  id              Int     @id @default(autoincrement())
+  sharedExpenseId Int     @map("shared_expense_id")
+  userId          Int     @map("user_id")
+  amountOwed      Float   @map("amount_owed")
+  isSettled       Boolean @default(false) @map("is_settled")
+
+  sharedExpense SharedExpense @relation(fields: [sharedExpenseId], references: [id], onDelete: Cascade)
+  user          User          @relation("ExpenseSplits", fields: [userId], references: [id])
+
+  @@index([sharedExpenseId])
+  @@index([userId])
+  @@map("shared_expense_splits")
+}
+
+// ─── Bank sync ──────────────────────────────────────────────────────────────
+// Modeled after Plaid's Link + Transactions flow (institution, linked
+// account, synced transactions). This sandbox has no network route to
+// Plaid's API and no API keys configured, so the sync engine runs in a
+// clearly-labeled demo mode that simulates linking and importing — the
+// same route shape a real Plaid integration would use, so swapping in
+// real `plaid` SDK calls later is a drop-in change, not a rewrite.
+
+model BankConnection {
+  id              Int       @id @default(autoincrement())
+  userId          Int       @map("user_id")
+  institutionName String    @map("institution_name")
+  accountName     String    @map("account_name")
+  accountMask     String    @map("account_mask") // last 4 digits
+  status          String    @default("active") // "active" | "error" | "disconnected"
+  lastSyncedAt    DateTime? @map("last_synced_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  user                 User                  @relation(fields: [userId], references: [id])
+  importedTransactions BankSyncTransaction[]
+
+  @@index([userId])
+  @@map("bank_connections")
+}
+
+model BankSyncTransaction {
+  id               Int      @id @default(autoincrement())
+  bankConnectionId Int      @map("bank_connection_id")
+  externalId       String   @map("external_id") // upstream transaction id, for idempotent re-sync
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  bankConnection BankConnection @relation(fields: [bankConnectionId], references: [id], onDelete: Cascade)
+
+  @@unique([bankConnectionId, externalId])
+  @@map("bank_sync_transactions")
 }

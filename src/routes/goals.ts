@@ -2,6 +2,7 @@ import { Router, Response } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
+import { checkGoalMilestones } from "../lib/finance.js";
 
 const router = Router();
 
@@ -83,6 +84,10 @@ async function updateGoalHandler(req: AuthRequest, res: Response) {
     // Auto-mark as completed when target is reached
     if (!goal.isCompleted && goal.currentAmount >= goal.targetAmount) {
       goal = await prisma.goal.update({ where: { id }, data: { isCompleted: true } });
+    }
+
+    if (currentAmount !== undefined && goal.currentAmount !== existing.currentAmount) {
+      await checkGoalMilestones(req.userId!, goal, existing.currentAmount);
     }
 
     res.json(enrichGoal(goal));
