@@ -1,11 +1,23 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import pinoHttp from "pino-http";
 import rateLimit from "express-rate-limit";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
 
 const app = express();
+
+// Behind a reverse proxy (Render/Railway/Nginx/etc.) — needed for correct
+// client IPs in rate limiting and secure cookies.
+app.set("trust proxy", 1);
+
+// ─── Security headers ────────────────────────────────────────────────────────
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 // ─── Global rate limit: 200 req / 15 min per IP ──────────────────────────────
 app.use(
