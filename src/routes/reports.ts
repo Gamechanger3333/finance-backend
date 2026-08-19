@@ -16,7 +16,7 @@ function resolveRange(req: AuthRequest): { startDate: string; endDate: string } 
   return { startDate: startDate!, endDate: endDate! };
 }
 
-async function buildSummary(userId: number, startDate: string, endDate: string) {
+export async function buildSummary(userId: number, startDate: string, endDate: string) {
   const transactions = await prisma.transaction.findMany({
     where: { userId, date: { gte: startDate, lte: endDate } },
     include: { category: { select: { name: true } } },

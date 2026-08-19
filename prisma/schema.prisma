@@ -53,6 +53,7 @@ model User {
   paidSharedExpenses    SharedExpense[]       @relation("PaidExpenses")
   expenseSplits         SharedExpenseSplit[]  @relation("ExpenseSplits")
   bankConnections       BankConnection[]
+  chatMessages          ChatMessage[]
 
   @@map("users")
 }
@@ -302,6 +303,24 @@ model SharedExpenseSplit {
   @@index([sharedExpenseId])
   @@index([userId])
   @@map("shared_expense_splits")
+}
+
+// ─── AI advisor chat history ───────────────────────────────────────────────
+// Persists the in-app AI Financial Advisor conversation per user so it
+// survives a refresh/new session, matching the "Clear conversation" action
+// in the UI (which deletes all rows for the user).
+
+model ChatMessage {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  role      String   // "user" | "assistant"
+  content   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("chat_messages")
 }
 
 // ─── Bank sync ──────────────────────────────────────────────────────────────

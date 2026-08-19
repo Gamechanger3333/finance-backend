@@ -16,6 +16,85 @@ export function advanceDate(dateStr: string, frequency: "weekly" | "monthly" | "
 }
 
 /**
+ * Logs a paid recurring bill as an expense transaction and rolls its
+ * nextDueDate forward. Shared by the manual "Mark Paid" button and the
+ * daily auto-pay cron job below, so both paths behave identically.
+ */
+export async function logRecurringBillPayment(bill: {
+  id: number;
+  userId: number;
+  name: string;
+  amount: number;
+  categoryId: number | null;
+  nextDueDate: string;
+  frequency: string;
+}) {
+  let categoryId = bill.categoryId;
+  if (!categoryId) {
+    const fallback = await prisma.category.findFirst({ where: { isDefault: true, type: "expense" }, select: { id: true } });
+    categoryId = fallback?.id ?? null;
+  }
+  if (!categoryId) return null; // nothing sensible to file it under — skip
+
+  const today = new Date().toISOString().slice(0, 10);
+  const [transaction, updatedBill] = await prisma.$transaction([
+    prisma.transaction.create({
+      data: {
+        userId: bill.userId,
+        type: "expense",
+        amount: bill.amount,
+        description: `${bill.name} (recurring)`,
+        date: today,
+        categoryId,
+      },
+    }),
+    prisma.recurringBill.update({
+      where: { id: bill.id },
+      data: { nextDueDate: advanceDate(bill.nextDueDate, bill.frequency as "weekly" | "monthly" | "yearly"), lastNotifiedDueDate: null },
+      include: { category: { select: { name: true, icon: true } } },
+    }),
+  ]);
+
+  return { transaction, bill: updatedBill };
+}
+
+/**
+ * Daily auto-pay sweep: for every active recurring bill whose nextDueDate
+ * has arrived (today or earlier), automatically logs the expense and rolls
+ * the due date forward — this is what actually makes recurring transactions
+ * "auto-created on schedule" rather than requiring a manual click every
+ * time. A user who wants to review a bill before it posts should mark it
+ * inactive and log it manually instead.
+ */
+export async function runRecurringBillAutoPay(): Promise<{ processed: number }> {
+  const today = new Date().toISOString().slice(0, 10);
+  const dueBills = await prisma.recurringBill.findMany({
+    where: { isActive: true, nextDueDate: { lte: today } },
+  });
+
+  let processed = 0;
+  for (const bill of dueBills) {
+    try {
+      const result = await logRecurringBillPayment(bill as any);
+      if (result) {
+        await prisma.notification.create({
+          data: {
+            userId: bill.userId,
+            title: `${bill.name} auto-paid`,
+            message: `$${bill.amount.toFixed(2)} was automatically logged as an expense.`,
+            type: "info",
+          },
+        });
+        processed++;
+      }
+    } catch {
+      // Skip this bill on error; the rest of the sweep should still run.
+    }
+  }
+  return { processed };
+}
+
+/**
  * Whole-day difference between a YYYY-MM-DD date and today (negative = overdue).
  */
 export function daysUntil(dateStr: string, now: Date = new Date()): number {

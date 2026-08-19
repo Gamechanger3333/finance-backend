@@ -2,7 +2,7 @@ import { Router, Response } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
-import { advanceDate, daysUntil, checkAndNotifyDueBills } from "../lib/finance.js";
+import { advanceDate, daysUntil, checkAndNotifyDueBills, logRecurringBillPayment } from "../lib/finance.js";
 
 const router = Router();
 
@@ -164,33 +164,10 @@ router.post("/:id/mark-paid", requireAuth, async (req: AuthRequest, res) => {
     const bill = await prisma.recurringBill.findFirst({ where: { id, userId: req.userId! } });
     if (!bill) { res.status(404).json({ error: "Recurring bill not found" }); return; }
 
-    let categoryId = bill.categoryId;
-    if (!categoryId) {
-      const fallback = await prisma.category.findFirst({ where: { isDefault: true, type: "expense" }, select: { id: true } });
-      categoryId = fallback?.id ?? null;
-    }
-    if (!categoryId) { res.status(400).json({ error: "No category available to log this payment against" }); return; }
+    const result = await logRecurringBillPayment(bill);
+    if (!result) { res.status(400).json({ error: "No category available to log this payment against" }); return; }
 
-    const today = new Date().toISOString().slice(0, 10);
-    const [transaction, updatedBill] = await prisma.$transaction([
-      prisma.transaction.create({
-        data: {
-          userId: req.userId!,
-          type: "expense",
-          amount: bill.amount,
-          description: `${bill.name} (recurring)`,
-          date: today,
-          categoryId,
-        },
-      }),
-      prisma.recurringBill.update({
-        where: { id: bill.id },
-        data: { nextDueDate: advanceDate(bill.nextDueDate, bill.frequency as Frequency), lastNotifiedDueDate: null },
-        include: { category: { select: { name: true, icon: true } } },
-      }),
-    ]);
-
-    res.json({ transaction, bill: serializeBill(updatedBill) });
+    res.json({ transaction: result.transaction, bill: serializeBill(result.bill) });
   } catch (err) {
     logger.error({ err }, "Mark bill paid error");
     res.status(500).json({ error: "Failed to mark bill as paid" });

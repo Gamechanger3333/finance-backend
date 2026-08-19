@@ -60,4 +60,24 @@ app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use("/api", router);
 
+// ─── 404 handler (JSON, not Express's default HTML page) ────────────────────
+app.use((req, res) => {
+  res.status(404).json({ error: "Not found" });
+});
+
+// ─── Global error handler ─────────────────────────────────────────────────────
+// Catches anything that reaches next(err) — malformed JSON bodies from
+// express.json(), and any error a route handler forgot to catch — and
+// always responds with JSON instead of falling through to Express's
+// default HTML error page.
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) { next(err); return; }
+  if (err?.type === "entity.parse.failed" || err instanceof SyntaxError) {
+    res.status(400).json({ error: "Invalid JSON in request body" });
+    return;
+  }
+  logger.error({ err }, "Unhandled error");
+  res.status(err?.status || err?.statusCode || 500).json({ error: "Something went wrong" });
+});
+
 export default app;
