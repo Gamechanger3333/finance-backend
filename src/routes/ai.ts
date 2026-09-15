@@ -9,6 +9,12 @@ import { buildSummary } from "./reports.js";
 
 const router = Router();
 
+// Groq deprecated llama-3.3-70b-versatile on 2026-06-17 (see
+// https://console.groq.com/docs/deprecations). Centralized here so a
+// future deprecation only needs one line changed instead of hunting
+// through every completions.create() call.
+const GROQ_MODEL = "openai/gpt-oss-120b";
+
 // AI calls cost real money/tokens per request — these routes had no rate
 // limiting at all before, unlike every other route in the app.
 const aiLimiter = rateLimit({
@@ -27,6 +33,32 @@ const landingChatLimiter = rateLimit({
 });
 
 const MAX_MESSAGE_LENGTH = 1000;
+
+/**
+ * Strips Markdown formatting from a model reply before it's sent to the
+ * frontend. The chat UI renders plain text (no Markdown parser), so
+ * relying on prompt instructions alone isn't reliable — models fall back
+ * to bold/table formatting habits often enough that this needs a hard
+ * server-side guarantee, not just a request.
+ */
+function stripMarkdown(text: string): string {
+  return text
+    // Table rows: "| a | b | c |" -> "a - b - c" (drop the separator row entirely)
+    .split("\n")
+    .filter((line) => !/^\s*\|?[\s:|-]+\|[\s:|-]*\|?\s*$/.test(line)) // drop "|---|---|" separator lines
+    .map((line) => {
+      if (line.includes("|")) {
+        return line.split("|").map((cell) => cell.trim()).filter(Boolean).join(" — ");
+      }
+      return line;
+    })
+    .join("\n")
+    .replace(/\*\*(.*?)\*\*/g, "$1") // **bold** -> bold
+    .replace(/\*(.*?)\*/g, "$1") // *italic* -> italic
+    .replace(/^#{1,6}\s+/gm, "") // # Headers -> plain line
+    .replace(/`([^`]+)`/g, "$1") // `code` -> code
+    .trim();
+}
 const MAX_HISTORY_TURNS = 6;
 
 function getGroq() {
@@ -109,13 +141,18 @@ Respond with a JSON object (no markdown, raw JSON only) with this exact structur
     try {
       const groq = getGroq();
       const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        reasoning_effort: "low", // simple, well-specified task — don't burn the token budget on deep reasoning
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 800,
+        max_tokens: 1200,
         temperature: 0.7,
       });
-      const text = completion.choices[0]?.message?.content ?? "{}";
-      parsed = JSON.parse(text);
+      const text = completion.choices[0]?.message?.content || "{}";
+      // Some models wrap JSON output in a ```json ... ``` code fence despite
+      // being told not to — strip it before parsing rather than letting the
+      // whole insights call fall back to defaults over a formatting quirk.
+      const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
+      parsed = JSON.parse(cleaned);
     } catch (aiErr) {
       logger.warn({ aiErr }, "Groq AI call failed, using fallback");
       parsed = {
@@ -168,6 +205,11 @@ router.post("/chat", aiLimiter, requireAuth, async (req: AuthRequest, res) => {
 - Budgets: ${ctx.budgets.map((b: any) => b.name).join(", ") || "None set"}
 - Outstanding Debt: $${ctx.debts.totalDebt.toFixed(2)}${ctx.debts.count ? ` (${ctx.debts.items.map((d: any) => `${d.name}: $${d.balance.toFixed(2)} @ ${d.apr}% APR`).join("; ")})` : " (none)"}
 - 30-day cash-flow: starting balance $${ctx.cashflow?.startingBalance?.toFixed(2) ?? "unknown"}${ctx.cashflow?.overdraftDate ? `, projected to dip negative around ${ctx.cashflow.overdraftDate}` : ", no projected overdraft"}
+
+Response rules:
+1. Reply in the SAME language/script the user's message is written in — English, Urdu, Roman Urdu (Urdu written in Latin letters), Hindi, or Arabic. Match their language, don't default to English.
+2. The financial figures listed above (income, expenses, goals, debts, cash-flow) are the app's own data and are in $ — describe those in $. But if the user states a different amount or currency themselves in their message (e.g. "my salary is 30000 rupees"), that's their own real-world figure, not the app's data — use it exactly as they stated it (same number, same currency they named) for any calculation about it. Never relabel or convert a currency the user explicitly named into $, and never invent an exchange-rate conversion unless they ask for one.
+3. Do not use Markdown formatting of any kind — no **bold**, no tables with | pipes, no # headers, no numbered/bulleted list syntax. This is a plain-text chat bubble that displays raw characters, not a rendered document. Write in short plain sentences; for a breakdown, use a new line per item with a plain dash, e.g. "- Rent: 15000".
 Be specific, actionable, and concise. Keep responses under 150 words.`;
 
     // Conversation history lets the assistant hold a real multi-turn
@@ -178,16 +220,17 @@ Be specific, actionable, and concise. Keep responses under 150 words.`;
     try {
       const groq = getGroq();
       const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        reasoning_effort: "low",
         messages: [
           { role: "system", content: systemPrompt },
           ...priorTurns,
           { role: "user", content: message },
         ],
-        max_tokens: 300,
+        max_tokens: 800,
         temperature: 0.7,
       });
-      reply = completion.choices[0]?.message?.content ?? "I'm having trouble connecting. Please try again.";
+      reply = stripMarkdown(completion.choices[0]?.message?.content || "I'm having trouble connecting. Please try again.");
     } catch (aiErr) {
       logger.warn({ aiErr }, "Groq chat failed");
       reply = "I'm your AI financial assistant. Please check your GROQ_API_KEY configuration to enable AI responses.";
@@ -272,15 +315,17 @@ Write a natural-language monthly financial report in plain prose (2-4 short para
     try {
       const groq = getGroq();
       const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        reasoning_effort: "low",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 500,
+        max_tokens: 1000,
         temperature: 0.6,
       });
-      report = completion.choices[0]?.message?.content ?? "";
+      report = stripMarkdown(completion.choices[0]?.message?.content || "");
+      if (!report) throw new Error("Empty response from model");
     } catch (aiErr) {
       logger.warn({ aiErr }, "Groq monthly report failed");
-      report = `In ${month}, you had $${summary.totalIncome.toFixed(2)} in income and $${summary.totalExpenses.toFixed(2)} in expenses, for a net of $${summary.netIncome.toFixed(2)}. Add your GROQ_API_KEY to enable the full AI-written narrative report.`;
+      report = `In ${month}, you had $${summary.totalIncome.toFixed(2)} in income and $${summary.totalExpenses.toFixed(2)} in expenses, for a net of $${summary.netIncome.toFixed(2)}. The AI-written narrative report couldn't be generated right now — try refreshing in a moment.`;
     }
 
     res.json({ month, report, summary: summaryForPrompt });
@@ -297,8 +342,9 @@ Write a natural-language monthly financial report in plain prose (2-4 short para
 // rate-limited more tightly than the in-app assistant since it's open to the
 // public internet.
 const LANDING_SYSTEM_PROMPT = `You are the FinFlow website assistant, greeting visitors on the public marketing/landing page (they are not logged in yet).
-FinFlow is a personal finance app with: smart analytics dashboards, an AI financial advisor (powered by Llama 3.3 via Groq), budget management with overspend alerts, goal tracking, automatic transaction categorization, and bank-level security. Plans: Free ($0, 50 tx/month, 3 budget categories, 10 AI chats/day), Pro ($9/mo, unlimited everything), Business ($29/mo, adds team seats + API access).
-Answer questions about the product, pricing, and general personal-finance/budgeting topics. Encourage visitors to create a free account or try the demo login when relevant, but don't be pushy. You do not have access to any specific person's financial data — if asked about "my" transactions/budgets, explain that this becomes available after signing in. Keep answers under 80 words and friendly.`;
+FinFlow is a personal finance app with: smart analytics dashboards, an AI financial advisor, budget management with overspend alerts, goal tracking, automatic transaction categorization, and bank-level security. Plans: Free ($0, 50 tx/month, 3 budget categories, 10 AI chats/day), Pro ($9/mo, unlimited everything), Business ($29/mo, adds team seats + API access).
+Answer questions about the product, pricing, and general personal-finance/budgeting topics. Encourage visitors to create a free account or try the demo login when relevant, but don't be pushy. You do not have access to any specific person's financial data — if asked about "my" transactions/budgets, explain that this becomes available after signing in. Keep answers under 80 words and friendly.
+Reply in the same language/script the visitor writes in (English, Urdu, Roman Urdu, Hindi, or Arabic), always keep prices in $, and don't use Markdown formatting (no **bold**, no tables) — this is a plain-text chat bubble.`;
 
 router.post("/landing-chat", landingChatLimiter, async (req, res) => {
   try {
@@ -317,18 +363,20 @@ router.post("/landing-chat", landingChatLimiter, async (req, res) => {
     try {
       const groq = getGroq();
       const completion = await groq.chat.completions.create({
-        model: "llama-3.3-70b-versatile",
+        model: GROQ_MODEL,
+        reasoning_effort: "low",
         messages: [
           { role: "system", content: LANDING_SYSTEM_PROMPT },
           ...priorTurns,
           { role: "user", content: message },
         ],
-        max_tokens: 220,
+        max_tokens: 600,
         temperature: 0.6,
       });
-      reply =
-        completion.choices[0]?.message?.content ??
-        "I'm having trouble connecting right now — please try again in a moment.";
+      reply = stripMarkdown(
+        completion.choices[0]?.message?.content ||
+        "I'm having trouble connecting right now — please try again in a moment."
+      );
     } catch (aiErr) {
       logger.warn({ aiErr }, "Groq landing chat failed");
       reply =

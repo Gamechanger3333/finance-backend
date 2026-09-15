@@ -2,8 +2,7 @@ import { Router } from "express";
 import prisma from "../db/index.js";
 import { requireAuth, AuthRequest } from "../middlewares/auth.js";
 import { logger } from "../lib/logger.js";
-import { getPeriodRange, getExpenseSpendByCategory, getMonthlyCashflow, checkAndNotifyDueBills, checkAndNotifyOverdraftRisk, checkAndNotifyBudgetOverspend, getCashflowForecast, daysUntil } from "../lib/finance.js";
-import { runDueFixedSavingsRules } from "../lib/savings.js";
+import { getPeriodRange, getExpenseSpendByCategory, getMonthlyCashflow, getCashflowForecast, daysUntil } from "../lib/finance.js";
 
 const router = Router();
 
@@ -29,10 +28,12 @@ router.get("/summary", requireAuth, async (req: AuthRequest, res) => {
     const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonth = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, "0")}`;
 
-    // Fire off any due/overdue bill reminders and projected-overdraft
-    // warnings (creates Notification rows) — this is our lazy substitute
-    // for a background cron.
-    await Promise.all([checkAndNotifyDueBills(userId), checkAndNotifyOverdraftRisk(userId), runDueFixedSavingsRules(userId), checkAndNotifyBudgetOverspend(userId)]);
+    // Due-bill reminders, overdraft warnings, fixed savings-rule
+    // contributions, and budget-overspend alerts now run once a day via
+    // the scheduled maintenance sweep (see lib/scheduler.ts + index.ts)
+    // instead of on every dashboard load — they're idempotent and don't
+    // need to run more than once per day per user, and running them here
+    // was silently duplicating the cash-flow forecast computed below.
 
     const [{ income: monthlyIncome, expenses: monthlyExpenses }, { income: lastIncome, expenses: lastExpenses }] =
       await Promise.all([getMonthTotals(userId, thisMonth), getMonthTotals(userId, lastMonth)]);
