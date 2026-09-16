@@ -109,7 +109,7 @@ router.post("/:id/sync", requireAuth, async (req: AuthRequest, res) => {
       });
     }
 
-    res.json({ imported, connection: { ...updated, createdAt: updated.createdAt.toISOString(), lastSyncedAt: updated.lastSyncedAt.toISOString() } });
+    res.json({ imported, connection: { ...updated, createdAt: updated.createdAt.toISOString(), lastSyncedAt: updated.lastSyncedAt!.toISOString() } });
   } catch (err) {
     logger.error({ err }, "Bank sync error");
     res.status(500).json({ error: "Failed to sync transactions" });
