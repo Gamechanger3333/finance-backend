@@ -13,7 +13,11 @@ const router = Router();
 // https://console.groq.com/docs/deprecations). Centralized here so a
 // future deprecation only needs one line changed instead of hunting
 // through every completions.create() call.
-const GROQ_MODEL = "openai/gpt-oss-120b";
+// Groq deprecated llama-3.3-70b-versatile on 2026-06-17 (see
+// https://console.groq.com/docs/deprecations). Reads from GROQ_MODEL env
+// var so a future deprecation is a dashboard config change, not a code
+// deploy — falls back to the current known-good model if unset.
+const GROQ_MODEL = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
 
 // AI calls cost real money/tokens per request — these routes had no rate
 // limiting at all before, unlike every other route in the app.
